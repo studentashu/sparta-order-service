@@ -6,25 +6,28 @@ import com.training.orderservice.client.dto.OrderConfirmationRequest;
 import com.training.orderservice.client.dto.ProductSnapshot;
 import com.training.orderservice.dto.request.CreateOrderRequest;
 import com.training.orderservice.dto.request.OrderItemRequest;
+import com.training.orderservice.dto.request.UpdateOrderStatusRequest;
 import com.training.orderservice.dto.response.OrderResponse;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
 import com.training.orderservice.entity.OrderStatus;
-import com.training.orderservice.exception.DuplicateProductInOrderException;
-import com.training.orderservice.exception.InsufficientStockException;
-import com.training.orderservice.exception.ProductNotFoundException;
+import com.training.orderservice.exception.*;
 import com.training.orderservice.mapper.OrderMapper;
 import com.training.orderservice.repository.OrderRepository;
 import com.training.orderservice.service.OrderService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class OrderServiceImpl implements OrderService {
@@ -118,5 +121,42 @@ public class OrderServiceImpl implements OrderService {
                 items,
                 LocalDateTime.now());
         notificationServiceClient.sendOrderConfirmation(payload);
+    }
+
+    private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
+
+    @Override
+    @Transactional
+    public OrderResponse updateStatus(UUID orderId, UpdateOrderStatusRequest request) {
+
+        if (request == null || request.getStatus() == null) {
+            throw new IllegalArgumentException("Status must not be null");
+        }
+
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
+
+        OrderStatus from = order.getStatus();
+        OrderStatus to = request.getStatus();
+
+        // Avoid unnecessary update
+        if (from == to) {
+            log.info("Order {} already in status {}", orderId, from);
+            return orderMapper.toResponse(order);
+        }
+
+        // Validate transition
+        if (!from.canManuallyTransitionTo(to)) {
+            log.warn("Invalid status transition for order {}: {} -> {}", orderId, from, to);
+            throw new InvalidOrderStatusTransitionException(from, to);
+        }
+
+        order.setStatus(to);
+
+        Order saved = orderRepository.save(order);
+
+        log.info("Order {} transitioned {} -> {}", orderId, from, to);
+
+        return orderMapper.toResponse(saved);
     }
 }
