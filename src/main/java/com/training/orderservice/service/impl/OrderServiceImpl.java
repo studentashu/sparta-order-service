@@ -6,26 +6,31 @@ import com.training.orderservice.client.dto.OrderConfirmationRequest;
 import com.training.orderservice.client.dto.ProductSnapshot;
 import com.training.orderservice.dto.request.CreateOrderRequest;
 import com.training.orderservice.dto.request.OrderItemRequest;
+import com.training.orderservice.dto.request.UpdateOrderStatusRequest;
 import com.training.orderservice.dto.response.OrderResponse;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
 import com.training.orderservice.entity.OrderStatus;
 import com.training.orderservice.exception.DuplicateProductInOrderException;
 import com.training.orderservice.exception.InsufficientStockException;
-import com.training.orderservice.exception.OrderNotFoundException;
+import com.training.orderservice.exception.ProductNotFoundException;
 import com.training.orderservice.mapper.OrderMapper;
 import com.training.orderservice.repository.OrderRepository;
 import com.training.orderservice.security.CallerContext;
 import com.training.orderservice.service.OrderService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class OrderServiceImpl implements OrderService {
@@ -78,21 +83,6 @@ public class OrderServiceImpl implements OrderService {
         dispatchConfirmationNotification(order);
 
         return orderMapper.toResponse(order);
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public Order getOrderById(Long orderId, CallerContext caller) {
-        Order order = orderRepository.findByIdWithItems(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
-
-        if (!caller.isAdmin() && !order.getCustomerId().equals(caller.customerId())) {
-            // BR-10: a cross-customer access attempt must not be distinguishable from a
-            // missing order, so this reuses OrderNotFoundException rather than a 403.
-            throw new OrderNotFoundException(orderId);
-        }
-
-        return order;
     }
 
     @Override
