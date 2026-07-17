@@ -6,36 +6,31 @@ import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-
 @Component
 public class OrderMapper {
 
     public OrderResponse toResponse(Order order) {
-        List<OrderItemResponse> items = order.getItems().stream()
-                .map(this::toItemResponse)
-                .toList();
-        return OrderResponse.builder()
-                .orderId(order.getId())
-                .customerId(order.getCustomerId())
-                .customerName(order.getCustomerName())
-                .customerEmail(order.getCustomerEmail())
-                .shippingAddress(order.getShippingAddress())
-                .status(order.getStatus())
-                .totalAmount(order.getTotalAmount())
-                .items(items)
-                .createdAt(order.getCreatedAt())
-                .updatedAt(order.getUpdatedAt())
-                .build();
+        return new OrderResponse(
+                order.getId(),
+                order.getCustomerId(),
+                order.getCustomerName(),
+                order.getCustomerEmail(),
+                order.getShippingAddress(),
+                order.getStatus(),
+                order.getTotalAmount(),
+                order.getItems().stream().map(this::toItemResponse).toList(),
+                order.getCreatedAt(),
+                order.getUpdatedAt()
+        );
     }
 
-    public OrderItemResponse toItemResponse(OrderItem item) {
-        return OrderItemResponse.builder()
-                .productId(item.getProductId())
-                .productName(item.getProductNameSnapshot())
-                .unitPrice(item.getUnitPriceSnapshot())
-                .quantity(item.getQuantity())
-                .subtotal(item.getSubtotal())
-                .build();
+    private OrderItemResponse toItemResponse(OrderItem item) {
+        return new OrderItemResponse(
+                item.getProductId(),
+                item.getProductNameSnapshot(),
+                item.getUnitPriceSnapshot(),
+                item.getQuantity(),
+                item.getSubtotal()
+        );
     }
 }

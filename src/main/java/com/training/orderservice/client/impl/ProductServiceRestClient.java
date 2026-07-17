@@ -5,7 +5,6 @@ import com.training.orderservice.client.dto.ProductSnapshot;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.util.UUID;
 
 /**
  * Static stub — Product Service isn't integrated yet (owned by another team/module).
@@ -21,7 +20,7 @@ public class ProductServiceRestClient implements ProductServiceClient {
     }
 
     @Override
-    public void reduceStock(Long productId, int quantity, UUID orderId) {
+    public void reduceStock(Long productId, int quantity, Long orderId) {
         // no-op until Product Service is integrated
     }
 }
