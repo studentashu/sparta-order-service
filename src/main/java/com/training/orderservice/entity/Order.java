@@ -109,6 +109,10 @@ public class Order {
         return items;
     }
 
+    public void addItem(OrderItem item) {
+        items.add(item);
+    }
+
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }

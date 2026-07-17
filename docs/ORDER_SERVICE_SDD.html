@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Order Service - Software Design Document</title>
+<style>
+  @page { margin: 20mm 16mm; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; }
+  h1 { font-size: 20pt; border-bottom: 3px solid #2c3e50; padding-bottom: 6px; margin-top: 0; }
+  h2 { font-size: 14.5pt; color: #2c3e50; border-bottom: 1px solid #cfd8dc; padding-bottom: 3px; margin-top: 26px; page-break-after: avoid; }
+  h3 { font-size: 12pt; color: #2c3e50; margin-top: 18px; page-break-after: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 16px 0; font-size: 9pt; }
+  th, td { border: 1px solid #b0bec5; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background-color: #eceff1; font-weight: 600; }
+  tr:nth-child(even) td { background-color: #fafafa; }
+  code { background: #f0f2f4; padding: 1px 4px; border-radius: 3px; font-family: Consolas, monospace; font-size: 9pt; }
+  pre { background: #f5f6f7; border: 1px solid #dde2e5; border-radius: 4px; padding: 10px; overflow-x: auto; font-size: 8pt; line-height: 1.3; page-break-inside: avoid; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 4px solid #90a4ae; margin: 10px 0; padding: 4px 14px; color: #455a64; background: #f8f9fa; }
+  hr { border: none; border-top: 2px solid #cfd8dc; margin: 22px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  a { color: #1565c0; }
+</style>
+</head>
+<body>
+<h1>Software Design Document</h1>
+<h2>Order Service — Mini E-Commerce Platform</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Document Type</strong></td>
+<td>Software Design Document (SDD)</td>
+</tr>
+<tr>
+<td><strong>Module</strong></td>
+<td>Order Service (independent microservice)</td>
+</tr>
+<tr>
+<td><strong>Owning Team Member</strong></td>
+<td>Order Service developer (1 of 4)</td>
+</tr>
+<tr>
+<td><strong>Related Services</strong></td>
+<td>Product Service (external), Notification Service (external)</td>
+</tr>
+<tr>
+<td><strong>Status</strong></td>
+<td>Draft — for team review before implementation</td>
+</tr>
+<tr>
+<td><strong>Version</strong></td>
+<td>1.1</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>1. Introduction</h2>
+<p>This document describes the design of the <strong>Order Service</strong>, one of three independent microservices that make up the Mini E-Commerce Platform. It is written for a 4-person team in which each member owns exactly one service. This document covers <strong>only</strong> the Order Service. The Product Service and Notification Service are treated as external systems with which the Order Service integrates over well-defined contracts; their internal design is out of scope here and is the responsibility of their respective owners.</p>
+<p>The goal is to provide enough detail — API contracts, data model, business rules, lifecycle, and integration contracts — that implementation can begin without further clarification, and that the Product Service and Notification Service can be integrated later (by other teams, on their own timelines) without forcing a redesign of the Order Service.</p>
+<h2>2. Project Overview</h2>
+<p>The Mini E-Commerce Platform lets customers place orders for products. It is decomposed into three microservices, each independently developed, tested, and deployed:</p>
+<ol>
+<li><strong>Product Service</strong> — owns product catalog, pricing, and inventory.</li>
+<li><strong>Order Service</strong> <em>(this document)</em> — owns orders, order line items, and order lifecycle.</li>
+<li><strong>Notification Service</strong> — owns delivery of order-related notifications (email/SMS/push).</li>
+</ol>
+<p>Each service has its own database (database-per-service pattern), its own deployment unit, and communicates with the others exclusively through REST APIs (or, in future, asynchronous events). No service reaches into another service&#39;s database.</p>
+<h2>3. Purpose of the Order Service</h2>
+<p>The Order Service is the system of record for <strong>orders</strong>. Its responsibilities are:</p>
+<ul>
+<li>Accept new orders from customers (or an upstream client/UI) and persist them.</li>
+<li>Track the status of an order through its lifecycle.</li>
+<li>Provide read access to order data (single order, all orders, filtered), restricted to the owning customer or an admin.</li>
+<li>Coordinate — but not own — stock verification and stock reduction by calling the Product Service.</li>
+<li>Trigger a notification after an order is successfully confirmed, by calling the Notification Service, without waiting on it.</li>
+</ul>
+<p>It does <strong>not</strong> decide product prices, does <strong>not</strong> manage inventory counts, and does <strong>not</strong> send emails/SMS itself.</p>
+<h2>4. Scope</h2>
+<p>The scope covers the design of the Order Service as a standalone Spring Boot microservice: its REST API, data model, business rules, status lifecycle, exception handling, resource-level authorization, resilience behavior toward its two dependencies, and the contracts it uses to talk to Product Service and Notification Service. Deployment topology, CI/CD pipeline design, and the internal design of the other two services are explicitly excluded.</p>
+<h2>5. In Scope</h2>
+<ul>
+<li>Create an order (one or more line items, each referencing a <code>productId</code> and <code>quantity</code>).</li>
+<li>Retrieve all orders (with basic filtering/pagination), scoped to the caller&#39;s own orders unless the caller is an admin.</li>
+<li>Retrieve a single order by ID, subject to the same ownership scoping.</li>
+<li>Update the status of an order.</li>
+<li>Cancel an order.</li>
+<li>(Optional, admin-only) Hard-delete an order record.</li>
+<li>Validation of order input data, including rejection of duplicate <code>productId</code> values within one request.</li>
+<li>Calling Product Service to verify product existence, check stock, and reduce stock.</li>
+<li>Notifying the Notification Service on order confirmation, asynchronously.</li>
+<li>Order Service&#39;s own database schema (order + order line items).</li>
+<li>Error handling and API response contracts for all of the above.</li>
+</ul>
+<h2>6. Out of Scope</h2>
+<ul>
+<li>Product catalog, product pricing, and inventory management (Product Service).</li>
+<li>Sending/rendering/delivering emails, SMS, or push notifications (Notification Service).</li>
+<li>Payment processing (assumed not part of this platform&#39;s current phase — see <a href="#30-assumptions">Assumptions</a>).</li>
+<li>User authentication/identity issuance (assumed handled upstream, e.g., API Gateway) — Order Service consumes the authenticated identity but does not issue it.</li>
+<li>Implementation details, database schema, or APIs of Product Service and Notification Service — only their <strong>contracts as consumed/produced by Order Service</strong> are documented here.</li>
+</ul>
+<h2>7. Functional Requirements</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FR-1</td>
+<td>The system shall allow creation of an order containing customer information and one or more order items (<code>productId</code>, <code>quantity</code>).</td>
+</tr>
+<tr>
+<td>FR-2</td>
+<td>Before confirming an order, the system shall verify each product exists and has sufficient stock via the Product Service, checking all items in parallel rather than sequentially.</td>
+</tr>
+<tr>
+<td>FR-3</td>
+<td>On successful stock verification, the system shall request stock reduction from the Product Service and set the order status to <code>CONFIRMED</code>.</td>
+</tr>
+<tr>
+<td>FR-4</td>
+<td>On failed verification (product not found or insufficient stock), the system shall reject the order and set its status to <code>REJECTED</code>, returning the reason to the caller.</td>
+</tr>
+<tr>
+<td>FR-5</td>
+<td>The system shall retrieve all orders, optionally filtered by <code>status</code> and/or <code>customerId</code>, with pagination — scoped to the caller&#39;s own orders unless the caller holds an admin role.</td>
+</tr>
+<tr>
+<td>FR-6</td>
+<td>The system shall retrieve a single order (with its line items) by order ID, subject to the same ownership scoping as FR-5.</td>
+</tr>
+<tr>
+<td>FR-7</td>
+<td>The system shall allow the status of an existing order to be updated, subject to the valid state-transition rules.</td>
+</tr>
+<tr>
+<td>FR-8</td>
+<td>The system shall allow an order to be cancelled while it is in a cancellable state, and shall not physically delete the record when cancelling.</td>
+</tr>
+<tr>
+<td>FR-9</td>
+<td>The system may optionally support a hard delete of an order record (administrative operation, distinct from cancellation, restricted to admin-role callers).</td>
+</tr>
+<tr>
+<td>FR-10</td>
+<td>On successful order confirmation, the system shall notify the Notification Service with the order details needed to compose a customer notification, dispatched asynchronously so the caller&#39;s response is never delayed by it.</td>
+</tr>
+<tr>
+<td>FR-11</td>
+<td>The system shall return meaningful, structured error responses for all failure cases (validation, not-found, invalid transition, access-denied, downstream failure).</td>
+</tr>
+<tr>
+<td>FR-12</td>
+<td>The system shall reject any request to view, modify, or cancel an order that does not belong to the calling customer (unless the caller holds an admin role), returning <code>403</code>/<code>404</code> rather than the order data.</td>
+</tr>
+<tr>
+<td>FR-13</td>
+<td>The system shall reject a create-order request containing duplicate <code>productId</code> values within the same request with a structured <code>400</code> error, rather than relying on a database constraint to catch it.</td>
+</tr>
+</tbody></table>
+<h2>8. Non-Functional Requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Independence</strong></td>
+<td>Deployable, testable, and runnable in isolation from Product Service and Notification Service (using stubs/mocks for those in dev/test).</td>
+</tr>
+<tr>
+<td><strong>Performance</strong></td>
+<td>Order creation (excluding downstream latency) should complete in &lt; 200ms at the Order Service layer; list endpoints must be paginated (page size capped server-side, see Section 22) to avoid unbounded response sizes.</td>
+</tr>
+<tr>
+<td><strong>Availability</strong></td>
+<td>The Order Service must degrade gracefully if Product Service or Notification Service is unavailable. Circuit breaker + bulkhead isolation around <code>ProductServiceClient</code> bounds the blast radius of a Product Service outage — see Section 14.</td>
+</tr>
+<tr>
+<td><strong>Scalability</strong></td>
+<td>Stateless service; horizontally scalable behind a load balancer; no in-memory session state. Per-item Product Service checks run in parallel, not sequentially; the Notification Service call runs on a dedicated async executor isolated from the request-handling thread pool, so its latency cannot consume capacity needed for other endpoints.</td>
+</tr>
+<tr>
+<td><strong>Data Integrity</strong></td>
+<td>Order status transitions must be atomic and follow the defined state machine; no order should be left in an ambiguous state longer than the reconciliation sweep interval (see Section 31).</td>
+</tr>
+<tr>
+<td><strong>Security</strong></td>
+<td>All endpoints assume an upstream authenticated context (e.g., API Gateway / JWT). Resource-level authorization (a customer may only access their own orders; hard-delete restricted to an admin role) is enforced on every endpoint that resolves a specific order — see BR-10/BR-11.</td>
+</tr>
+<tr>
+<td><strong>Observability</strong></td>
+<td>Structured logging of all state transitions and downstream calls; correlation/trace ID propagated on outbound calls, including the asynchronously-dispatched Notification Service call.</td>
+</tr>
+<tr>
+<td><strong>Maintainability</strong></td>
+<td>Layered architecture (Controller → Service → Repository), DTOs isolated from JPA entities, external calls isolated behind client interfaces.</td>
+</tr>
+<tr>
+<td><strong>Portability</strong></td>
+<td>Business logic must not depend on a specific relational database vendor. Target engine is PostgreSQL — see Section 19/20, Assumption 1.</td>
+</tr>
+</tbody></table>
+<h2>9. Business Rules</h2>
+<ul>
+<li>BR-1: An order must have exactly one customer and at least one order item.</li>
+<li>BR-2: Each order item references exactly one <code>productId</code> and a <code>quantity &gt;= 1</code>. The Order Service does not store or validate product price/name — it may cache a denormalized snapshot for display purposes only (see <a href="#21-entity-design">Entity Design</a>).</li>
+<li>BR-3: An order cannot be confirmed unless <strong>every</strong> item in it passes product-existence and stock-availability checks. Partial fulfillment is not supported in this version (all-or-nothing).</li>
+<li>BR-4: Stock is only reduced after all items are verified — never speculatively.</li>
+<li>BR-5: An order can only be cancelled while in <code>PENDING</code> or <code>CONFIRMED</code> state. Orders in <code>SHIPPED</code>, <code>DELIVERED</code>, <code>REJECTED</code>, or already <code>CANCELLED</code> cannot be cancelled again.</li>
+<li>BR-6: Cancelling a <code>CONFIRMED</code> order (i.e., one where stock was already reduced) should trigger a compensating stock-restore call to the Product Service (see <a href="#31-risks">Risks</a> regarding consistency).</li>
+<li>BR-7: Status transitions must follow the state machine in Section 11; any other transition is rejected with <code>409 Conflict</code>.</li>
+<li>BR-8: Notification is only triggered on a transition <strong>into</strong> <code>CONFIRMED</code>, exactly once, dispatched asynchronously (see Section 15).</li>
+<li>BR-9: <code>orderId</code> is system-generated as a <code>BIGINT</code> surrogate key (database sequence), never client-supplied.</li>
+<li>BR-10: A customer may only retrieve, update, or cancel their own orders; cross-customer access attempts return <code>403</code>/<code>404</code> (without confirming whether the order exists). Admin-role callers may access any order.</li>
+<li>BR-11: Hard-delete (<code>DELETE /orders/{orderId}</code>) is restricted to callers holding an admin role; it is not reachable by standard customer-facing clients.</li>
+<li>BR-12: A <code>CreateOrderRequest</code> containing duplicate <code>productId</code> values across its items is rejected with a <code>400</code> validation error before it reaches persistence, rather than relying on the <code>uq_order_items_order_product</code> database constraint to catch it.</li>
+</ul>
+<h2>10. Order Lifecycle</h2>
+<pre><code>        create order
+             │
+             ▼
+        ┌─────────┐
+        │ PENDING │  (stock verification in progress / awaiting confirmation)
+        └────┬────┘
+     verify  │  verify
+     success │  fails
+        ┌────┴─────┐
+        ▼          ▼
+  ┌───────────┐ ┌──────────┐
+  │ CONFIRMED │ │ REJECTED │  (terminal — product invalid or out of stock)
+  └─────┬─────┘ └──────────┘
+        │
+   ┌────┼─────────────┐
+   │    │              │
+   ▼    ▼              ▼
+CANCELLED  SHIPPED   (cancel request)
+ (terminal)   │
+              ▼
+          DELIVERED (terminal, future scope)
+</code></pre>
+<ul>
+<li><code>PENDING</code> — initial state immediately after the create request is accepted, before/while Product Service is consulted.</li>
+<li><code>CONFIRMED</code> — all items verified, stock reduced, notification dispatched (asynchronously).</li>
+<li><code>REJECTED</code> — terminal; verification failed (product missing or insufficient stock).</li>
+<li><code>CANCELLED</code> — terminal; customer/admin cancelled a <code>PENDING</code> or <code>CONFIRMED</code> order.</li>
+<li><code>SHIPPED</code> / <code>DELIVERED</code> — optional future states, included in the model now so the enum doesn&#39;t need to change later (see <a href="#32-future-enhancements">Future Enhancements</a>); not required for MVP status-update flows beyond simple manual transition.</li>
+</ul>
+<h2>11. Order Status Transition Rules</h2>
+<table>
+<thead>
+<tr>
+<th>From \ To</th>
+<th>PENDING</th>
+<th>CONFIRMED</th>
+<th>REJECTED</th>
+<th>CANCELLED</th>
+<th>SHIPPED</th>
+<th>DELIVERED</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>PENDING</strong></td>
+<td>–</td>
+<td>✅ (system, post-verification)</td>
+<td>✅ (system, post-verification)</td>
+<td>✅ (user/admin)</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>CONFIRMED</strong></td>
+<td>❌</td>
+<td>–</td>
+<td>❌</td>
+<td>✅ (user/admin)</td>
+<td>✅ (admin/manual, MVP)</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>REJECTED</strong></td>
+<td>❌</td>
+<td>❌</td>
+<td>–</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>CANCELLED</strong></td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>–</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>SHIPPED</strong></td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>–</td>
+<td>✅ (admin/manual)</td>
+</tr>
+<tr>
+<td><strong>DELIVERED</strong></td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>–</td>
+</tr>
+</tbody></table>
+<p><code>PENDING → CONFIRMED/REJECTED</code> is a <strong>system-driven</strong> transition executed synchronously as part of order creation (not a separate manual API call in MVP). <code>→ CANCELLED</code> and <code>SHIPPED → DELIVERED</code> are <strong>manual</strong> transitions via the update-status endpoint. Any transition not marked ✅ returns <code>409 Conflict</code> with an <code>InvalidOrderStatusTransitionException</code>.</p>
+<h2>12. Service Responsibilities</h2>
+<p><strong>Owns:</strong></p>
+<ul>
+<li>Order aggregate (order header + order line items).</li>
+<li>Customer information <em>as attached to an order</em> (name, email, shipping address) — this is a snapshot captured at order time, not a customer master record.</li>
+<li>Order status and its transition rules.</li>
+<li>Quantity ordered per line item.</li>
+<li>Product reference (<code>productId</code> only — an opaque foreign key from the Order Service&#39;s point of view).</li>
+</ul>
+<p><strong>Does not own</strong> (delegates to other services):</p>
+<ul>
+<li>Product name, description, category, pricing — Product Service.</li>
+<li>Inventory/stock counts — Product Service (Order Service only <em>requests</em> checks/reductions).</li>
+<li>Notification content, templates, delivery channel, delivery status — Notification Service.</li>
+<li>Customer master data / authentication — Order Service stores only what&#39;s needed to fulfill the order, and trusts (does not issue) the authenticated identity it receives.</li>
+</ul>
+<h2>13. Service Boundaries</h2>
+<p>The Order Service is a bounded context whose aggregate root is <code>Order</code>. It exposes its capabilities only through its REST API and consumes other services only through their REST APIs — there is no shared database, shared JAR of entities, or direct method call across service boundaries. This keeps the three services independently deployable: as long as the contracts in Sections 14/15/29 remain stable, Product Service and Notification Service can change their internal implementation freely, and vice versa.</p>
+<p>Key boundary decisions:</p>
+<ul>
+<li>Order Service stores <code>productId</code> as a plain value (e.g., <code>Long</code>/<code>UUID</code>), <strong>not</strong> a JPA relationship/foreign key into another service&#39;s table.</li>
+<li>Any product data shown on an order (name, price) is either fetched live from Product Service at read time, or stored as an immutable snapshot at order-creation time — this project uses the <strong>snapshot approach</strong> for <code>unitPrice</code>/<code>productName</code> display fields to avoid a hard read-time dependency on Product Service for historical orders (see <a href="#21-entity-design">Entity Design</a>, <a href="#30-assumptions">Assumptions</a>).</li>
+</ul>
+<h2>14. Integration with Product Service</h2>
+<p>The Order Service is a <strong>consumer</strong> of the Product Service API. Product Service is not designed here; only the contract Order Service depends on is defined.</p>
+<p><strong>Resilience:</strong> <code>ProductServiceClient</code> calls are wrapped in a circuit breaker (Resilience4j) and executed on a dedicated bulkhead thread pool, isolated from the pool serving read-only endpoints (<code>GET /orders</code>, <code>GET /orders/{id}</code>). A Product Service outage can degrade order creation, but it cannot starve unrelated read traffic.</p>
+<p><strong>Concurrency for multi-item orders:</strong> per-item existence/availability checks are issued in parallel, not in a sequential loop, so total latency is bounded by the slowest single check rather than the sum of all of them.</p>
+<p><strong>Calls made by Order Service, per order creation:</strong></p>
+<ol>
+<li><code>GET /api/v1/products/{productId}</code> — confirm the product exists and fetch a display snapshot (name, price). <code>404</code> ⇒ order item is invalid.</li>
+<li><code>GET /api/v1/products/{productId}/availability?quantity={qty}</code> — confirm sufficient stock. Returns <code>{ &quot;available&quot;: true|false }</code>. (May be combined with call #1 — see <a href="#29-external-api-contracts">External API Contracts</a> for both options.)</li>
+<li><code>POST /api/v1/products/{productId}/stock/reduce</code> with body <code>{ &quot;quantity&quot;: &lt;qty&gt; }</code> — executed only after <strong>all</strong> items in the order pass checks 1 and 2. Idempotency is achieved by passing the Order Service&#39;s <code>orderId</code> as an idempotency key header (<code>Idempotency-Key</code>) so retries don&#39;t double-deduct stock.</li>
+</ol>
+<p><strong>Proposed resolution — pending Product Service owner confirmation:</strong> combine calls 1 and 2 into a single <code>GET /products/{productId}</code> response that already includes <code>stockQuantity</code>, cutting per-item round-trips from two to one. If the Product Service team needs multiple products checked at once, a bulk variant (e.g. <code>POST /products/availability/bulk</code> accepting a list of <code>{productId, quantity}</code>) is the alternative. Either shape is workable — this needs to be pinned down in writing with the Product Service owner before both teams build against it (see Section 29.1).</p>
+<p><strong>Compensating call on cancellation of a <code>CONFIRMED</code> order:</strong></p>
+<ol start="4">
+<li><code>POST /api/v1/products/{productId}/stock/restore</code> with body <code>{ &quot;quantity&quot;: &lt;qty&gt; }</code> — best-effort compensation; see <a href="#31-risks">Risks</a> for the consistency caveat (no distributed transaction), paired with a near-term reconciliation sweep (see <a href="#31-risks">Risks</a>).</li>
+</ol>
+<p><strong>Client implementation notes:</strong></p>
+<ul>
+<li>Isolated behind a <code>ProductServiceClient</code> interface in the <code>client</code> package so the HTTP mechanism (RestClient/RestTemplate/WebClient/OpenFeign) is an implementation detail.</li>
+<li>Configured with connect/read timeouts and a bounded retry policy; failures are translated into service-specific exceptions (<code>ProductNotFoundException</code>, <code>ProductServiceUnavailableException</code>), never leaked as raw HTTP exceptions.</li>
+<li>Base URL is externalized via configuration (<code>product-service.base-url</code>), enabling service discovery or an API gateway to be introduced later without code changes.</li>
+</ul>
+<h2>15. Integration with Notification Service</h2>
+<p>The Order Service is a <strong>producer</strong> with respect to Notification Service — it announces that something happened; it does not know or care how the notification is delivered.</p>
+<p><strong>Trigger:</strong> exactly once, on the <code>PENDING → CONFIRMED</code> transition, after stock reduction succeeds.</p>
+<p><strong>MVP contract (synchronous REST from Notification Service&#39;s point of view, asynchronous from the caller&#39;s):</strong>
+<code>POST /api/v1/notifications/order-confirmations</code> on the Notification Service, with the payload defined in <a href="#29-external-api-contracts">Section 29</a>.</p>
+<p><strong>Design decision:</strong> the call to the Notification Service is dispatched via a dedicated bounded async executor (e.g., Spring <code>@Async</code> on its own thread pool, <code>notification-executor</code>), not on the request-handling thread. The order-creation request thread does not wait on this call at all — it fires the call after the local <code>CONFIRMED</code> status commit and returns the response immediately. Failure of the call is logged, not surfaced as an order-creation failure (see <a href="#31-risks">Risks</a> and <a href="#32-future-enhancements">Future Enhancements</a> for the recommended move to an async event/message broker to remove this coupling entirely).</p>
+<h2>16. High-Level Architecture</h2>
+<pre><code>                         ┌───────────────────────┐
+                         │   API Gateway / Client │
+                         └───────────┬────────────┘
+                                     │ REST (JSON)
+                                     ▼
+                         ┌───────────────────────┐
+                         │      Order Service      │
+                         │  (Spring Boot, this doc) │
+                         │                         │
+                         │  Controller → Service   │
+                         │      → Repository       │
+                         └───┬───────────────┬─────┘
+                             │               │
+     REST client [bulkhead+CB] │           │ async dispatch (dedicated executor)
+                             ▼               ▼
+                 ┌───────────────────┐  ┌───────────────────────┐
+                 │  Product Service  │  │  Notification Service │
+                 │ (external, other  │  │  (external, other      │
+                 │  team&#39;s module)   │  │   team&#39;s module)       │
+                 └───────────────────┘  └───────────────────────┘
+                             
+        ┌───────────────────────────────┐
+        │  Order Service&#39;s own database  │
+        │  (orders, order_items tables)  │
+        └───────────────────────────────┘
+</code></pre>
+<p>Each box above is an independently deployable unit; only the Order Service box is designed/implemented as part of this document. The Product Service link runs through a bulkhead + circuit breaker; the Notification Service link is fire-and-forget on its own executor, never on the request thread.</p>
+<h2>17. Component Diagram (Text)</h2>
+<pre><code>Order Service
+ ├── OrderController                 (REST endpoints, Section 22)
+ │     └── depends on → OrderService (interface)
+ │
+ ├── OrderServiceImpl                 (business logic, orchestration)
+ │     ├── depends on → OrderRepository
+ │     ├── depends on → OrderItemRepository (or cascaded via OrderRepository)
+ │     ├── depends on → ProductServiceClient   (interface → HTTP impl, circuit-breaker + bulkhead wrapped)
+ │     ├── depends on → NotificationServiceClient (interface → async-dispatched HTTP impl)
+ │     ├── depends on → OrderOwnershipValidator (resource-level authorization)
+ │     └── depends on → OrderMapper (entity &lt;-&gt; DTO)
+ │
+ ├── ProductServiceClient (interface)
+ │     └── ProductServiceRestClient (impl — RestClient/Feign, Resilience4j CircuitBreaker + Bulkhead)
+ │
+ ├── NotificationServiceClient (interface)
+ │     └── NotificationServiceRestClient (impl, invoked via @Async on notification-executor)
+ │
+ ├── OrderRepository (Spring Data JPA)
+ ├── OrderItemRepository (Spring Data JPA)
+ │
+ ├── Entities: Order, OrderItem, OrderStatus (enum)
+ ├── DTOs: request/*, response/*
+ ├── Exceptions: OrderNotFoundException, InvalidOrderStatusTransitionException,
+ │               ProductNotFoundException, InsufficientStockException,
+ │               ProductServiceUnavailableException, OrderAccessDeniedException,
+ │               DuplicateProductInOrderException
+ └── GlobalExceptionHandler (@ControllerAdvice)
+</code></pre>
+<h2>18. Package Structure</h2>
+<pre><code>com.training.orderservice
+ ├── controller
+ │     └── OrderController
+ ├── service
+ │     ├── OrderService                     (interface)
+ │     └── impl/OrderServiceImpl
+ ├── security
+ │     └── OrderOwnershipValidator
+ ├── client
+ │     ├── ProductServiceClient             (interface)
+ │     ├── impl/ProductServiceRestClient
+ │     ├── NotificationServiceClient        (interface)
+ │     └── impl/NotificationServiceRestClient
+ ├── repository
+ │     ├── OrderRepository
+ │     └── OrderItemRepository
+ ├── entity
+ │     ├── Order
+ │     ├── OrderItem
+ │     └── OrderStatus (enum)
+ ├── dto
+ │     ├── request/CreateOrderRequest, OrderItemRequest, UpdateOrderStatusRequest
+ │     └── response/OrderResponse, OrderItemResponse, ErrorResponse
+ ├── mapper
+ │     └── OrderMapper
+ ├── exception
+ │     ├── OrderNotFoundException
+ │     ├── InvalidOrderStatusTransitionException
+ │     ├── ProductNotFoundException
+ │     ├── InsufficientStockException
+ │     ├── ProductServiceUnavailableException
+ │     ├── OrderAccessDeniedException
+ │     ├── DuplicateProductInOrderException
+ │     └── GlobalExceptionHandler
+ └── config
+       ├── RestClientConfig                 (timeouts, base URLs, circuit breaker + bulkhead)
+       ├── AsyncConfig                      (dedicated notification-executor thread pool)
+       └── OpenApiConfig                     (future — API docs)
+</code></pre>
+<p>This matches the existing project skeleton (<code>groupId: com.training</code>, <code>artifactId: order-service</code>, base package <code>com.training.orderservice</code>).</p>
+<h2>19. Database Design</h2>
+<blockquote>
+<p><strong>Note on database engine:</strong> the functional brief for this exercise references MySQL, but the project&#39;s <code>pom.xml</code> is configured with the PostgreSQL driver (<code>org.postgresql:postgresql</code>). <strong>PostgreSQL</strong> is the target engine for this design. MySQL syntax notes are retained only as migration context in case the team switches engines.</p>
+</blockquote>
+<p><strong>Table: <code>orders</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>order_id</td>
+<td>BIGINT (sequence-generated)</td>
+<td>PK</td>
+</tr>
+<tr>
+<td>customer_id</td>
+<td>BIGINT</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>customer_name</td>
+<td>VARCHAR(150)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>customer_email</td>
+<td>VARCHAR(150)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>shipping_address</td>
+<td>VARCHAR(500)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>status</td>
+<td>VARCHAR(20)</td>
+<td>NOT NULL, default <code>PENDING</code></td>
+</tr>
+<tr>
+<td>total_amount</td>
+<td>DECIMAL(12,2)</td>
+<td>NOT NULL, default 0 (sum of line items)</td>
+</tr>
+<tr>
+<td>created_at</td>
+<td>TIMESTAMP</td>
+<td>NOT NULL, default now</td>
+</tr>
+<tr>
+<td>updated_at</td>
+<td>TIMESTAMP</td>
+<td>NOT NULL, auto-updated</td>
+</tr>
+</tbody></table>
+<p><strong>Table: <code>order_items</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>order_item_id</td>
+<td>BIGINT (sequence-generated)</td>
+<td>PK</td>
+</tr>
+<tr>
+<td>order_id</td>
+<td>BIGINT</td>
+<td>FK → <code>orders.order_id</code>, NOT NULL, <code>ON DELETE CASCADE</code></td>
+</tr>
+<tr>
+<td>product_id</td>
+<td>BIGINT</td>
+<td>NOT NULL (opaque reference to Product Service)</td>
+</tr>
+<tr>
+<td>product_name_snapshot</td>
+<td>VARCHAR(200)</td>
+<td>NOT NULL (denormalized at order time)</td>
+</tr>
+<tr>
+<td>unit_price_snapshot</td>
+<td>DECIMAL(12,2)</td>
+<td>NOT NULL (denormalized at order time)</td>
+</tr>
+<tr>
+<td>quantity</td>
+<td>INT</td>
+<td>NOT NULL, <code>CHECK (quantity &gt;= 1)</code></td>
+</tr>
+<tr>
+<td>subtotal</td>
+<td>DECIMAL(12,2)</td>
+<td>NOT NULL, generated = <code>unit_price_snapshot * quantity</code></td>
+</tr>
+</tbody></table>
+<p><strong>Indexes:</strong></p>
+<ul>
+<li><code>idx_orders_customer_id</code> on <code>orders(customer_id)</code></li>
+<li><code>idx_orders_status</code> on <code>orders(status)</code></li>
+<li><code>idx_orders_created_at</code> on <code>orders(created_at)</code></li>
+<li><code>idx_order_items_order_id</code> on <code>order_items(order_id)</code> (usually created automatically by the FK)</li>
+</ul>
+<p><strong>Design decision:</strong> <code>order_items</code> is a child table (one-to-many from <code>orders</code>), not a single <code>product_id</code>/<code>quantity</code> column pair on <code>orders</code> itself. This matches real e-commerce carts (multiple products per order) and satisfies &quot;quantity ordered&quot; + &quot;product reference&quot; per line item, while still letting a simple order have just one row in <code>order_items</code>. Naming is standardized on <code>order_items</code>/<code>order_id</code>/<code>order_item_id</code> (plural table, matching <code>orders</code>) consistently across this section, Section 20, and Section 21.</p>
+<h2>20. Database Schema</h2>
+<h3>20.1 SQL DDL</h3>
+<p>Production-ready DDL for PostgreSQL, the confirmed target engine. ID generation uses named sequences rather than <code>GENERATED ALWAYS AS IDENTITY</code> — see the design-decision note below the DDL for why.</p>
+<pre><code class="language-sql">-- =====================================================================
+-- Order Service — Schema DDL (PostgreSQL, sequence-based IDs)
+-- =====================================================================
+
+CREATE SEQUENCE orders_id_seq START WITH 1000 INCREMENT BY 50;
+CREATE SEQUENCE order_items_id_seq START WITH 1000 INCREMENT BY 50;
+
+CREATE TABLE orders (
+    order_id            BIGINT PRIMARY KEY DEFAULT nextval(&#39;orders_id_seq&#39;),
+    customer_id         BIGINT NOT NULL,
+    customer_name       VARCHAR(150) NOT NULL,
+    customer_email      VARCHAR(150) NOT NULL,
+    shipping_address    VARCHAR(500) NOT NULL,
+    status              VARCHAR(20) NOT NULL DEFAULT &#39;PENDING&#39;,
+    total_amount        DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_orders_status CHECK (
+        status IN (&#39;PENDING&#39;,&#39;CONFIRMED&#39;,&#39;REJECTED&#39;,&#39;CANCELLED&#39;,&#39;SHIPPED&#39;,&#39;DELIVERED&#39;)
+    ),
+    CONSTRAINT chk_orders_total_amount_non_negative CHECK (total_amount &gt;= 0)
+);
+
+CREATE INDEX idx_orders_customer_id ON orders(customer_id);
+CREATE INDEX idx_orders_status      ON orders(status);
+CREATE INDEX idx_orders_created_at  ON orders(created_at);
+
+CREATE TABLE order_items (
+    order_item_id           BIGINT PRIMARY KEY DEFAULT nextval(&#39;order_items_id_seq&#39;),
+    order_id                BIGINT NOT NULL,
+    product_id              BIGINT NOT NULL,
+    product_name_snapshot   VARCHAR(200) NOT NULL,
+    unit_price_snapshot     DECIMAL(12,2) NOT NULL,
+    quantity                INT NOT NULL,
+    subtotal                DECIMAL(12,2) GENERATED ALWAYS AS (unit_price_snapshot * quantity) STORED,
+
+    CONSTRAINT fk_order_items_order_id
+        FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    CONSTRAINT chk_order_items_quantity_positive CHECK (quantity &gt;= 1),
+    CONSTRAINT chk_order_items_unit_price_non_negative CHECK (unit_price_snapshot &gt;= 0),
+    CONSTRAINT uq_order_items_order_product UNIQUE (order_id, product_id)
+);
+
+CREATE INDEX idx_order_items_order_id   ON order_items(order_id);
+CREATE INDEX idx_order_items_product_id ON order_items(product_id);
+</code></pre>
+<p><strong>Why sequences instead of <code>IDENTITY</code>:</strong> <code>GENERATED ALWAYS AS IDENTITY</code> maps to Hibernate&#39;s <code>GenerationType.IDENTITY</code>, which forces one-row-at-a-time inserts and disables JDBC batching, because Hibernate must round-trip to the DB to learn the generated key before processing the next entity. A named sequence with <code>GenerationType.SEQUENCE</code> and a batched <code>allocationSize</code> (e.g., 50, matching <code>INCREMENT BY 50</code> above) lets Hibernate pre-allocate a block of IDs and batch inserts instead — a real win on the order-creation hot path, at the cost of small ID gaps on app restart. (MySQL/MariaDB pre-8.0 lack real sequences; a table-based hi-lo allocator is the usual substitute if the team ultimately picks MySQL.)</p>
+<p>Notes:</p>
+<ul>
+<li><code>subtotal</code> is a computed/generated column (<code>GENERATED ALWAYS AS ... STORED</code>), supported by both PostgreSQL 12+ and MySQL 5.7+, so it can never drift from <code>unit_price_snapshot * quantity</code>.</li>
+<li><code>uq_order_items_order_product</code> prevents the same product appearing as two separate line items on one order — a repeat purchase within an order should increase <code>quantity</code> on the existing row instead. This is now backed by an explicit DTO-level validation too (BR-12, Section 24), so a violation surfaces as a clean <code>400</code> rather than a raw constraint error.</li>
+<li>No foreign key references a Product Service table — <code>product_id</code> is stored as a plain, unconstrained column (see Section 20.4).</li>
+</ul>
+<h3>20.2 Entity Relationship Diagram (ERD)</h3>
+<p><strong>Mermaid:</strong></p>
+<pre><code class="language-mermaid">erDiagram
+    ORDERS ||--o{ ORDER_ITEMS : &quot;contains&quot;
+    ORDERS {
+        bigint order_id PK
+        bigint customer_id
+        varchar customer_name
+        varchar customer_email
+        varchar shipping_address
+        varchar status
+        decimal total_amount
+        timestamp created_at
+        timestamp updated_at
+    }
+    ORDER_ITEMS {
+        bigint order_item_id PK
+        bigint order_id FK
+        bigint product_id &quot;opaque ref to Product Service&quot;
+        varchar product_name_snapshot
+        decimal unit_price_snapshot
+        int quantity
+        decimal subtotal
+    }
+</code></pre>
+<p><strong>Text-based:</strong></p>
+<pre><code>┌───────────────────────────┐
+│           orders           │
+├───────────────────────────┤
+│ PK  order_id                │
+│     customer_id             │
+│     customer_name           │
+│     customer_email          │
+│     shipping_address        │
+│     status                  │
+│     total_amount            │
+│     created_at              │
+│     updated_at               │
+└─────────────┬─────────────┘
+              │ 1
+              │
+              │  contains
+              │
+              │ N
+┌─────────────┴─────────────┐
+│        order_items         │
+├───────────────────────────┤
+│ PK  order_item_id           │
+│ FK  order_id  ─────────────┼──▶ orders.order_id
+│     product_id  (opaque ref to Product Service — no FK)
+│     product_name_snapshot   │
+│     unit_price_snapshot     │
+│     quantity                 │
+│     subtotal                 │
+└───────────────────────────┘
+
+orders
+    |
+    | 1
+    |
+    |----&lt; order_items
+</code></pre>
+<h3>20.3 Data Dictionary</h3>
+<p><strong>Table: <code>orders</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Data Type</th>
+<th>Length</th>
+<th>Nullable</th>
+<th>Default</th>
+<th>Description</th>
+<th>Constraint</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>order_id</td>
+<td>BIGINT (sequence)</td>
+<td>–</td>
+<td>No</td>
+<td><code>nextval(&#39;orders_id_seq&#39;)</code></td>
+<td>Surrogate primary key</td>
+<td>PK</td>
+</tr>
+<tr>
+<td>customer_id</td>
+<td>BIGINT</td>
+<td>–</td>
+<td>No</td>
+<td>–</td>
+<td>Customer placing the order (opaque reference; no Customer Service in this platform)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>customer_name</td>
+<td>VARCHAR</td>
+<td>150</td>
+<td>No</td>
+<td>–</td>
+<td>Customer display name captured at order time</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>customer_email</td>
+<td>VARCHAR</td>
+<td>150</td>
+<td>No</td>
+<td>–</td>
+<td>Customer email captured at order time</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>shipping_address</td>
+<td>VARCHAR</td>
+<td>500</td>
+<td>No</td>
+<td>–</td>
+<td>Delivery address for this order</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>status</td>
+<td>VARCHAR</td>
+<td>20</td>
+<td>No</td>
+<td><code>&#39;PENDING&#39;</code></td>
+<td>Current lifecycle state (Section 10/11)</td>
+<td>NOT NULL, CHECK enum</td>
+</tr>
+<tr>
+<td>total_amount</td>
+<td>DECIMAL</td>
+<td>12,2</td>
+<td>No</td>
+<td><code>0.00</code></td>
+<td>Sum of all <code>order_items.subtotal</code></td>
+<td>NOT NULL, CHECK ≥ 0</td>
+</tr>
+<tr>
+<td>created_at</td>
+<td>TIMESTAMP</td>
+<td>–</td>
+<td>No</td>
+<td><code>CURRENT_TIMESTAMP</code></td>
+<td>Row creation time</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>updated_at</td>
+<td>TIMESTAMP</td>
+<td>–</td>
+<td>No</td>
+<td><code>CURRENT_TIMESTAMP</code></td>
+<td>Last modification time (app-updated on every status change)</td>
+<td>NOT NULL</td>
+</tr>
+</tbody></table>
+<p><strong>Table: <code>order_items</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Data Type</th>
+<th>Length</th>
+<th>Nullable</th>
+<th>Default</th>
+<th>Description</th>
+<th>Constraint</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>order_item_id</td>
+<td>BIGINT (sequence)</td>
+<td>–</td>
+<td>No</td>
+<td><code>nextval(&#39;order_items_id_seq&#39;)</code></td>
+<td>Surrogate primary key</td>
+<td>PK</td>
+</tr>
+<tr>
+<td>order_id</td>
+<td>BIGINT</td>
+<td>–</td>
+<td>No</td>
+<td>–</td>
+<td>Parent order</td>
+<td>FK → <code>orders.order_id</code>, <code>ON DELETE CASCADE</code></td>
+</tr>
+<tr>
+<td>product_id</td>
+<td>BIGINT</td>
+<td>–</td>
+<td>No</td>
+<td>–</td>
+<td>Opaque reference to a product in Product Service — no FK (Section 20.4)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>product_name_snapshot</td>
+<td>VARCHAR</td>
+<td>200</td>
+<td>No</td>
+<td>–</td>
+<td>Product name at order time (denormalized, Section 20.5)</td>
+<td>NOT NULL</td>
+</tr>
+<tr>
+<td>unit_price_snapshot</td>
+<td>DECIMAL</td>
+<td>12,2</td>
+<td>No</td>
+<td>–</td>
+<td>Unit price at order time (denormalized, Section 20.5)</td>
+<td>NOT NULL, CHECK ≥ 0</td>
+</tr>
+<tr>
+<td>quantity</td>
+<td>INT</td>
+<td>–</td>
+<td>No</td>
+<td>–</td>
+<td>Units of this product ordered</td>
+<td>NOT NULL, CHECK ≥ 1</td>
+</tr>
+<tr>
+<td>subtotal</td>
+<td>DECIMAL</td>
+<td>12,2</td>
+<td>No</td>
+<td>computed</td>
+<td><code>unit_price_snapshot * quantity</code>, generated column</td>
+<td>NOT NULL (generated)</td>
+</tr>
+<tr>
+<td><em>(composite)</em></td>
+<td>–</td>
+<td>–</td>
+<td>–</td>
+<td>–</td>
+<td>A product may appear at most once per order</td>
+<td>UNIQUE (<code>order_id</code>, <code>product_id</code>)</td>
+</tr>
+</tbody></table>
+<h3>20.4 Relationships</h3>
+<ul>
+<li><strong>One Order contains many Order Items</strong> — <code>orders (1) ──&lt; order_items (N)</code>, enforced by <code>order_items.order_id</code> referencing <code>orders.order_id</code>.</li>
+<li><strong>One Order Item belongs to exactly one Order</strong> — <code>order_items.order_id</code> is <code>NOT NULL</code>; an order item cannot exist without its parent order.</li>
+<li><strong>Product is referenced only by <code>product_id</code></strong> — <code>order_items.product_id</code> is a plain <code>BIGINT</code> value with no foreign key, since the product record lives in the Product Service&#39;s own database.</li>
+<li><strong>No cross-microservice foreign keys</strong> — the Order Service database has zero FK constraints pointing at any table owned by Product Service or Notification Service. Each microservice owns and migrates its own schema independently (database-per-service pattern, Section 20.5); referential integrity for <code>product_id</code> is enforced at the application layer via the Product Service API call in Section 14, not at the database layer.</li>
+</ul>
+<h3>20.5 Database Design Decisions</h3>
+<ul>
+<li><strong><code>order_items</code> is a separate table, not columns on <code>orders</code>.</strong> An order may contain multiple products, each with its own quantity and price; modeling this as a child table supports that without limiting an order to a single line item, while still allowing a simple one-item order to be just one child row.</li>
+<li><strong>Product information is stored as a snapshot (<code>product_name_snapshot</code>, <code>unit_price_snapshot</code>).</strong> Product name and price can change after an order is placed (Product Service is the owner and may update either at any time). Snapshotting at order-creation time guarantees historical orders display what the customer actually saw and paid, without requiring a live call to Product Service every time an old order is read.</li>
+<li><strong>Cross-microservice foreign keys are avoided.</strong> A physical FK from <code>order_items.product_id</code> to a Product Service table would require both services to share a database or replicate schemas, which breaks independent deployability — either service could no longer be migrated, scaled, or released without coordinating with the other.</li>
+<li><strong>Database-per-service pattern is followed.</strong> The Order Service owns and exclusively accesses this schema; Product Service and Notification Service each own their own database. This is what allows all three services (and their three different developers) to evolve their schemas independently, matching the team&#39;s one-developer-per-service structure described in Section 2.</li>
+</ul>
+<h3>20.6 Sample Database Records</h3>
+<p><strong><code>orders</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>order_id</th>
+<th>customer_id</th>
+<th>customer_name</th>
+<th>customer_email</th>
+<th>shipping_address</th>
+<th>status</th>
+<th>total_amount</th>
+<th>created_at</th>
+<th>updated_at</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1001</td>
+<td>101</td>
+<td>Jane Doe</td>
+<td><a href="mailto:jane.doe@example.com">jane.doe@example.com</a></td>
+<td>221B Baker Street, London</td>
+<td>CONFIRMED</td>
+<td>145.50</td>
+<td>2026-07-16 10:15:30</td>
+<td>2026-07-16 10:15:32</td>
+</tr>
+<tr>
+<td>1002</td>
+<td>102</td>
+<td>Raj Mehta</td>
+<td><a href="mailto:raj.mehta@example.com">raj.mehta@example.com</a></td>
+<td>12 MG Road, Bengaluru</td>
+<td>PENDING</td>
+<td>25.00</td>
+<td>2026-07-16 11:02:10</td>
+<td>2026-07-16 11:02:10</td>
+</tr>
+<tr>
+<td>1003</td>
+<td>101</td>
+<td>Jane Doe</td>
+<td><a href="mailto:jane.doe@example.com">jane.doe@example.com</a></td>
+<td>221B Baker Street, London</td>
+<td>CANCELLED</td>
+<td>95.50</td>
+<td>2026-07-15 09:40:05</td>
+<td>2026-07-15 09:55:00</td>
+</tr>
+</tbody></table>
+<p><strong><code>order_items</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>order_item_id</th>
+<th>order_id</th>
+<th>product_id</th>
+<th>product_name_snapshot</th>
+<th>unit_price_snapshot</th>
+<th>quantity</th>
+<th>subtotal</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>5001</td>
+<td>1001</td>
+<td>55</td>
+<td>Wireless Mouse</td>
+<td>25.00</td>
+<td>2</td>
+<td>50.00</td>
+</tr>
+<tr>
+<td>5002</td>
+<td>1001</td>
+<td>78</td>
+<td>Mechanical Keyboard</td>
+<td>95.50</td>
+<td>1</td>
+<td>95.50</td>
+</tr>
+<tr>
+<td>5003</td>
+<td>1002</td>
+<td>55</td>
+<td>Wireless Mouse</td>
+<td>25.00</td>
+<td>1</td>
+<td>25.00</td>
+</tr>
+<tr>
+<td>5004</td>
+<td>1003</td>
+<td>78</td>
+<td>Mechanical Keyboard</td>
+<td>95.50</td>
+<td>1</td>
+<td>95.50</td>
+</tr>
+</tbody></table>
+<h3>20.7 Naming Conventions</h3>
+<table>
+<thead>
+<tr>
+<th>Element</th>
+<th>Convention</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Table names</td>
+<td>Plural, <code>snake_case</code>, no prefix</td>
+<td><code>orders</code>, <code>order_items</code></td>
+</tr>
+<tr>
+<td>Column names</td>
+<td><code>snake_case</code>, descriptive, no Hungarian prefixes</td>
+<td><code>customer_email</code>, <code>shipping_address</code></td>
+</tr>
+<tr>
+<td>Primary key</td>
+<td><code>&lt;singular_table&gt;_id</code></td>
+<td><code>order_id</code>, <code>order_item_id</code></td>
+</tr>
+<tr>
+<td>Foreign key</td>
+<td>Same name as the referenced table&#39;s PK, so the relationship is obvious from the column name alone</td>
+<td><code>order_items.order_id</code> → <code>orders.order_id</code></td>
+</tr>
+<tr>
+<td>Index</td>
+<td><code>idx_&lt;table&gt;_&lt;column(s)&gt;</code></td>
+<td><code>idx_orders_status</code>, <code>idx_order_items_order_id</code></td>
+</tr>
+<tr>
+<td>Check constraint</td>
+<td><code>chk_&lt;table&gt;_&lt;rule&gt;</code></td>
+<td><code>chk_orders_status</code>, <code>chk_order_items_quantity_positive</code></td>
+</tr>
+<tr>
+<td>Unique constraint</td>
+<td><code>uq_&lt;table&gt;_&lt;column(s)&gt;</code></td>
+<td><code>uq_order_items_order_product</code></td>
+</tr>
+<tr>
+<td>Foreign key constraint</td>
+<td><code>fk_&lt;table&gt;_&lt;column&gt;</code></td>
+<td><code>fk_order_items_order_id</code></td>
+</tr>
+</tbody></table>
+<h2>21. Entity Design</h2>
+<p><strong><code>Order</code> (aggregate root)</strong></p>
+<ul>
+<li><code>id</code>, <code>customerId</code>, <code>customerName</code>, <code>customerEmail</code>, <code>shippingAddress</code></li>
+<li><code>status</code> (enum <code>OrderStatus</code>: <code>PENDING</code>, <code>CONFIRMED</code>, <code>REJECTED</code>, <code>CANCELLED</code>, <code>SHIPPED</code>, <code>DELIVERED</code>)</li>
+<li><code>totalAmount</code></li>
+<li><code>items: List&lt;OrderItem&gt;</code> — <code>@OneToMany(mappedBy = &quot;order&quot;, cascade = CascadeType.ALL, orphanRemoval = true)</code></li>
+<li><code>createdAt</code>, <code>updatedAt</code> — auditing fields</li>
+</ul>
+<p><strong><code>OrderItem</code></strong></p>
+<ul>
+<li><code>id</code>, <code>order: Order</code> (<code>@ManyToOne</code>), <code>productId</code>, <code>productNameSnapshot</code>, <code>unitPriceSnapshot</code>, <code>quantity</code>, <code>subtotal</code></li>
+</ul>
+<p><strong><code>OrderStatus</code></strong> — enum as listed above.</p>
+<p><strong>Column mapping:</strong> <code>Order.id</code> maps to column <code>order_id</code> via <code>@Id @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = &quot;orders_seq&quot;) @SequenceGenerator(name = &quot;orders_seq&quot;, sequenceName = &quot;orders_id_seq&quot;, allocationSize = 50) @Column(name = &quot;order_id&quot;)</code>. The same pattern applies to <code>OrderItem.id</code> → <code>order_item_id</code> with <code>order_items_id_seq</code>. This makes the Java-field-to-DB-column relationship explicit, since the Java field name (<code>id</code>) and the DB column name (<code>order_id</code>/<code>order_item_id</code>) differ.</p>
+<p>Entities are never returned directly from controllers; all API traffic goes through DTOs (Section 23), keeping the persistence model free to evolve independently of the public contract.</p>
+<h2>22. REST API Specification</h2>
+<p>Base path: <code>/api/v1/orders</code></p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Description</th>
+<th>Success</th>
+<th>Failure</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/api/v1/orders</code></td>
+<td>Create a new order</td>
+<td><code>201 Created</code> + <code>OrderResponse</code></td>
+<td><code>400</code> validation, <code>404</code> product not found, <code>409</code> insufficient stock</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/v1/orders</code></td>
+<td>List orders (query: <code>status</code>, <code>customerId</code>, <code>page</code>, <code>size</code>) — scoped to caller&#39;s own orders unless admin</td>
+<td><code>200 OK</code> + paged <code>OrderResponse[]</code></td>
+<td><code>400</code> invalid filter</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/v1/orders/{orderId}</code></td>
+<td>Get one order</td>
+<td><code>200 OK</code> + <code>OrderResponse</code></td>
+<td><code>403</code>/<code>404</code> not found or not owned by caller</td>
+</tr>
+<tr>
+<td>PATCH</td>
+<td><code>/api/v1/orders/{orderId}/status</code></td>
+<td>Update order status</td>
+<td><code>200 OK</code> + <code>OrderResponse</code></td>
+<td><code>403</code>/<code>404</code> not found/not owned, <code>409</code> invalid transition</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/orders/{orderId}/cancel</code></td>
+<td>Cancel an order</td>
+<td><code>200 OK</code> + <code>OrderResponse</code></td>
+<td><code>403</code>/<code>404</code> not found/not owned, <code>409</code> not cancellable</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/v1/orders/{orderId}</code></td>
+<td><em>(Optional, admin-only)</em> Hard-delete an order</td>
+<td><code>204 No Content</code></td>
+<td><code>403</code> not admin, <code>404</code> not found</td>
+</tr>
+</tbody></table>
+<p>Notes:</p>
+<ul>
+<li><code>POST .../cancel</code> is used instead of overloading the generic status-update endpoint, so &quot;cancel&quot; carries its own authorization/business rule (BR-5, BR-6) distinct from arbitrary status edits.</li>
+<li>List endpoint defaults: <code>page=0</code>, <code>size=20</code>, sorted by <code>createdAt DESC</code>. <code>size</code> is capped server-side at a maximum of 100 regardless of what the client requests — values above the cap are clamped, not rejected, to protect the database from an unbounded scan.</li>
+<li>Every endpoint that resolves a specific <code>orderId</code> enforces resource-level authorization first (BR-10): the caller&#39;s <code>customerId</code> must match the order&#39;s <code>customerId</code>, or the caller must hold an admin role. A mismatch returns <code>403</code> (or <code>404</code>, to avoid confirming the order&#39;s existence — pick one convention consistently). The <code>DELETE</code> endpoint additionally requires the admin role regardless of ownership (BR-11).</li>
+</ul>
+<h2>23. Request and Response Models</h2>
+<p><strong><code>CreateOrderRequest</code></strong></p>
+<pre><code class="language-json">{
+  &quot;customerId&quot;: 101,
+  &quot;customerName&quot;: &quot;Jane Doe&quot;,
+  &quot;customerEmail&quot;: &quot;jane.doe@example.com&quot;,
+  &quot;shippingAddress&quot;: &quot;221B Baker Street, London&quot;,
+  &quot;items&quot;: [
+    { &quot;productId&quot;: 55, &quot;quantity&quot;: 2 },
+    { &quot;productId&quot;: 78, &quot;quantity&quot;: 1 }
+  ]
+}
+</code></pre>
+<p><strong><code>UpdateOrderStatusRequest</code></strong></p>
+<pre><code class="language-json">{ &quot;status&quot;: &quot;SHIPPED&quot; }
+</code></pre>
+<p><strong><code>OrderResponse</code></strong></p>
+<pre><code class="language-json">{
+  &quot;orderId&quot;: 1001,
+  &quot;customerId&quot;: 101,
+  &quot;customerName&quot;: &quot;Jane Doe&quot;,
+  &quot;customerEmail&quot;: &quot;jane.doe@example.com&quot;,
+  &quot;shippingAddress&quot;: &quot;221B Baker Street, London&quot;,
+  &quot;status&quot;: &quot;CONFIRMED&quot;,
+  &quot;totalAmount&quot;: 145.50,
+  &quot;items&quot;: [
+    { &quot;productId&quot;: 55, &quot;productName&quot;: &quot;Wireless Mouse&quot;, &quot;unitPrice&quot;: 25.00, &quot;quantity&quot;: 2, &quot;subtotal&quot;: 50.00 },
+    { &quot;productId&quot;: 78, &quot;productName&quot;: &quot;Mechanical Keyboard&quot;, &quot;unitPrice&quot;: 95.50, &quot;quantity&quot;: 1, &quot;subtotal&quot;: 95.50 }
+  ],
+  &quot;createdAt&quot;: &quot;2026-07-16T10:15:30Z&quot;,
+  &quot;updatedAt&quot;: &quot;2026-07-16T10:15:32Z&quot;
+}
+</code></pre>
+<p><strong><code>ErrorResponse</code></strong></p>
+<pre><code class="language-json">{
+  &quot;timestamp&quot;: &quot;2026-07-16T10:16:00Z&quot;,
+  &quot;status&quot;: 409,
+  &quot;error&quot;: &quot;INSUFFICIENT_STOCK&quot;,
+  &quot;message&quot;: &quot;Product 78 has only 0 units available, requested 1.&quot;,
+  &quot;path&quot;: &quot;/api/v1/orders&quot;
+}
+</code></pre>
+<p>New error codes follow the same <code>ErrorResponse</code> shape: <code>DUPLICATE_PRODUCT_IN_ORDER</code> (400) and <code>ORDER_ACCESS_DENIED</code> (403).</p>
+<h2>24. Validation Rules</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>customerId</code></td>
+<td>required, positive</td>
+</tr>
+<tr>
+<td><code>customerName</code></td>
+<td>required, max 150 chars</td>
+</tr>
+<tr>
+<td><code>customerEmail</code></td>
+<td>required, valid email format</td>
+</tr>
+<tr>
+<td><code>shippingAddress</code></td>
+<td>required, max 500 chars</td>
+</tr>
+<tr>
+<td><code>items</code></td>
+<td>required, min size 1</td>
+</tr>
+<tr>
+<td><code>items[].productId</code></td>
+<td>required, positive</td>
+</tr>
+<tr>
+<td><code>items[].quantity</code></td>
+<td>required, integer ≥ 1</td>
+</tr>
+<tr>
+<td><code>items[]</code> (as a set)</td>
+<td>no duplicate <code>productId</code> values across items in the same request — rejected with <code>400 DUPLICATE_PRODUCT_IN_ORDER</code> (BR-12) rather than surfacing the DB unique-constraint error</td>
+</tr>
+<tr>
+<td><code>status</code> (update)</td>
+<td>required, must be one of the <code>OrderStatus</code> enum values</td>
+</tr>
+<tr>
+<td><code>orderId</code> (path)</td>
+<td>must resolve to an existing order owned by the caller (or caller is admin), else <code>403</code>/<code>404</code></td>
+</tr>
+<tr>
+<td><code>page</code> / <code>size</code> (query)</td>
+<td><code>size</code> clamped server-side to a maximum of 100</td>
+</tr>
+</tbody></table>
+<p>Validation is enforced at the DTO layer (Bean Validation annotations plus the duplicate-<code>productId</code> check) before any business logic or downstream calls execute, so malformed requests fail fast without consuming Product Service quota.</p>
+<h2>25. Exception Handling Strategy</h2>
+<p>A centralized <code>@ControllerAdvice</code> (<code>GlobalExceptionHandler</code>) maps exceptions to the <code>ErrorResponse</code> contract:</p>
+<table>
+<thead>
+<tr>
+<th>Exception</th>
+<th>HTTP Status</th>
+<th>Error code</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>MethodArgumentNotValidException</code> (bean validation)</td>
+<td>400</td>
+<td><code>VALIDATION_ERROR</code></td>
+</tr>
+<tr>
+<td><code>OrderNotFoundException</code></td>
+<td>404</td>
+<td><code>ORDER_NOT_FOUND</code></td>
+</tr>
+<tr>
+<td><code>ProductNotFoundException</code></td>
+<td>404</td>
+<td><code>PRODUCT_NOT_FOUND</code></td>
+</tr>
+<tr>
+<td><code>InsufficientStockException</code></td>
+<td>409</td>
+<td><code>INSUFFICIENT_STOCK</code></td>
+</tr>
+<tr>
+<td><code>InvalidOrderStatusTransitionException</code></td>
+<td>409</td>
+<td><code>INVALID_STATUS_TRANSITION</code></td>
+</tr>
+<tr>
+<td><code>ProductServiceUnavailableException</code></td>
+<td>503</td>
+<td><code>PRODUCT_SERVICE_UNAVAILABLE</code></td>
+</tr>
+<tr>
+<td><code>OrderAccessDeniedException</code></td>
+<td>403</td>
+<td><code>ORDER_ACCESS_DENIED</code></td>
+</tr>
+<tr>
+<td><code>DuplicateProductInOrderException</code></td>
+<td>400</td>
+<td><code>DUPLICATE_PRODUCT_IN_ORDER</code></td>
+</tr>
+<tr>
+<td><code>NotificationServiceException</code></td>
+<td><em>(not surfaced to client — logged only, see Section 15)</em></td>
+<td>n/a</td>
+</tr>
+<tr>
+<td><code>Exception</code> (fallback)</td>
+<td>500</td>
+<td><code>INTERNAL_ERROR</code></td>
+</tr>
+</tbody></table>
+<p>Downstream client exceptions (from <code>ProductServiceClient</code>) are translated at the client boundary into the domain-specific exceptions above — the service layer never handles raw <code>HttpClientErrorException</code>/<code>RestClientException</code> types directly.</p>
+<h2>26. Sequence Diagram — Place Order</h2>
+<pre><code>Client            OrderController        OrderServiceImpl        ProductServiceClient      ProductService        NotificationServiceClient   NotificationService     DB
+  │  POST /orders        │                       │                       │                       │                        │                     │            │
+  │──────────────────────▶                       │                       │                       │                        │                     │            │
+  │                      │──createOrder(req)────▶│                       │                       │                        │                     │            │
+  │                      │                       │──save (status=PENDING)───────────────────────────────────────────────────────────────────────────────────▶│
+  │                      │                       │                       │                       │                        │                     │            │
+  │                      │                       │──[PARALLEL] for each item: checkProduct + checkStock──▶│                       │                        │                     │            │
+  │                      │                       │                       │──GET /products/{id}──▶│                       │                        │                     │            │
+  │                      │                       │                       │◀──200 OK / 404────────│                       │                        │                     │            │
+  │                      │                       │                       │──GET /availability──▶│                       │                        │                     │            │
+  │                      │                       │                       │◀──available:true/false│                       │                        │                     │            │
+  │                      │                       │   (if any check fails)│                       │                        │                     │            │
+  │                      │                       │──update status=REJECTED──────────────────────────────────────────────────────────────────────────────────▶│
+  │                      │◀──201 Created (REJECTED, reason)──────────────│                       │                        │                     │            │
+  │◀─────────────────────│                       │                       │                       │                        │                     │            │
+  │                      │                       │   (if all checks pass)│                       │                        │                     │            │
+  │                      │                       │──reduceStock(productId, qty) per item──────────▶│                       │                        │                     │            │
+  │                      │                       │                       │──POST /stock/reduce──▶│                       │                        │                     │            │
+  │                      │                       │                       │◀──200 OK──────────────│                       │                        │                     │            │
+  │                      │                       │──update status=CONFIRMED (local commit)──────────────────────────────────────────────────────────────────▶│
+  │                      │◀──201 Created (CONFIRMED)                     │                       │                        │                     │            │
+  │◀─────────────────────│                       │                       │                       │                        │                     │            │
+  │                      │                       │──[AFTER responding, on notification-executor, fire-and-forget]────────▶│                     │            │
+  │                      │                       │                       │                       │                        │──POST /order-confirmations──▶│
+  │                      │                       │                       │                       │                        │◀──202 Accepted (best-effort)──│
+</code></pre>
+<p>Notes on this flow:</p>
+<ol>
+<li>Product existence/availability checks for all items are issued <strong>in parallel</strong>, not in a sequential per-item loop — bounds worst-case latency to the slowest single check rather than the sum of all checks.</li>
+<li>The response to the client (<code>201 Created</code>) is returned immediately after the local <code>CONFIRMED</code> commit. The Notification Service call happens <strong>after</strong> that, on a separate executor — neither the client nor the thread that served the request waits on it.</li>
+</ol>
+<h2>27. Sequence Diagram — Update Order Status</h2>
+<pre><code>Client        OrderController      OrderServiceImpl      OrderOwnershipValidator      OrderRepository       DB
+  │ PATCH /orders/{id}/status │                    │                     │                    │
+  │────────────────────────▶ │                    │                     │                    │
+  │                          │──updateStatus(id, newStatus)──▶│                     │                    │
+  │                          │                    │──findById(id)──────────────────────────▶│
+  │                          │                    │◀──Order──────────────────────────────────│
+  │                          │                    │──checkOwnership(caller, order)──▶│                    │
+  │                          │                    │◀──allowed / 403───│                    │
+  │                          │                    │  validate transition (Section 11)
+  │                          │                    │  [invalid] throw InvalidOrderStatusTransitionException
+  │                          │                    │  [valid]   set status, updatedAt
+  │                          │                    │──save(order)───────────────────────────▶│
+  │                          │◀──OrderResponse────│                     │                    │
+  │◀─────────────────────────│                    │                     │                    │
+</code></pre>
+<p>The ownership check (BR-10) happens before the transition validation, so a caller who doesn&#39;t own the order never learns anything about its current status.</p>
+<h2>28. Sequence Diagram — Cancel Order</h2>
+<pre><code>Client        OrderController      OrderServiceImpl      OrderOwnershipValidator      ProductServiceClient    ProductService     OrderRepository    DB
+  │ POST /orders/{id}/cancel │                    │                     │                    │              │
+  │─────────────────────────▶│                    │                     │                    │              │
+  │                          │──cancelOrder(id)──▶│                     │                    │              │
+  │                          │                    │──findById(id)──────────────────────────────────────────▶│
+  │                          │                    │◀──Order─────────────────────────────────────────────────│
+  │                          │                    │──checkOwnership(caller, order)──▶│                    │              │
+  │                          │                    │◀──allowed / 403───│                    │              │
+  │                          │                    │  check status ∈ {PENDING, CONFIRMED} (BR-5)
+  │                          │                    │  [not cancellable] throw InvalidOrderStatusTransitionException
+  │                          │                    │  [was CONFIRMED] restoreStock(items)──▶│                    │
+  │                          │                    │                     │──POST /stock/restore──▶│              │
+  │                          │                    │                     │◀──200 OK (best-effort)──│              │
+  │                          │                    │  [restore failed] record for reconciliation sweep (Section 31)
+  │                          │                    │  set status = CANCELLED, updatedAt
+  │                          │                    │──save(order)────────────────────────────────────────────▶│
+  │                          │◀──OrderResponse────│                     │                    │              │
+  │◀─────────────────────────│                    │                     │                    │              │
+</code></pre>
+<h2>29. External API Contracts</h2>
+<p>These are the contracts the Order Service <strong>depends on</strong> or <strong>produces for</strong>. They are proposed interface contracts for the other teams to implement — Order Service does not implement either side of these.</p>
+<h3>29.1 Product Service (consumed by Order Service)</h3>
+<p><strong>Contract shape — recommended, pending Product Service owner sign-off:</strong> combine existence + availability into one call, <code>GET /api/v1/products/{productId}</code> returning <code>stockQuantity</code> directly, so Order Service compares client-side instead of making a second round-trip. If the Product Service owner prefers a dedicated availability endpoint instead, that&#39;s still workable — either way, this needs to be confirmed in writing before both teams build.</p>
+<p><code>GET /api/v1/products/{productId}</code></p>
+<pre><code class="language-json">// 200 OK
+{ &quot;productId&quot;: 55, &quot;name&quot;: &quot;Wireless Mouse&quot;, &quot;price&quot;: 25.00, &quot;stockQuantity&quot;: 40 }
+// 404 Not Found → { &quot;error&quot;: &quot;PRODUCT_NOT_FOUND&quot;, &quot;message&quot;: &quot;Product 55 does not exist&quot; }
+</code></pre>
+<p><code>GET /api/v1/products/{productId}/availability?quantity={qty}</code> <em>(fallback shape, if Product Service prefers a separate endpoint)</em></p>
+<pre><code class="language-json">// 200 OK
+{ &quot;productId&quot;: 55, &quot;requestedQuantity&quot;: 2, &quot;available&quot;: true }
+</code></pre>
+<p><code>POST /api/v1/products/{productId}/stock/reduce</code>
+Headers: <code>Idempotency-Key: &lt;orderId&gt;</code></p>
+<pre><code class="language-json">// Request
+{ &quot;quantity&quot;: 2 }
+// 200 OK
+{ &quot;productId&quot;: 55, &quot;remainingStock&quot;: 38 }
+// 409 Conflict (race condition — stock changed since availability check)
+{ &quot;error&quot;: &quot;INSUFFICIENT_STOCK&quot;, &quot;message&quot;: &quot;Only 1 unit available&quot; }
+</code></pre>
+<p><code>POST /api/v1/products/{productId}/stock/restore</code> (compensation on cancellation)</p>
+<pre><code class="language-json">// Request
+{ &quot;quantity&quot;: 2 }
+// 200 OK
+{ &quot;productId&quot;: 55, &quot;remainingStock&quot;: 40 }
+</code></pre>
+<h3>29.2 Notification Service (produced/called by Order Service)</h3>
+<p><code>POST /api/v1/notifications/order-confirmations</code> (dispatched via <code>notification-executor</code>, not the request thread)</p>
+<pre><code class="language-json">// Request
+{
+  &quot;orderId&quot;: 1001,
+  &quot;customerId&quot;: 101,
+  &quot;customerName&quot;: &quot;Jane Doe&quot;,
+  &quot;customerEmail&quot;: &quot;jane.doe@example.com&quot;,
+  &quot;totalAmount&quot;: 145.50,
+  &quot;items&quot;: [
+    { &quot;productName&quot;: &quot;Wireless Mouse&quot;, &quot;quantity&quot;: 2 },
+    { &quot;productName&quot;: &quot;Mechanical Keyboard&quot;, &quot;quantity&quot;: 1 }
+  ],
+  &quot;confirmedAt&quot;: &quot;2026-07-16T10:15:32Z&quot;
+}
+// 202 Accepted (Notification Service queues delivery asynchronously)
+</code></pre>
+<p><strong>Recommended future contract:</strong> replace this synchronous call with Order Service publishing an <code>OrderConfirmedEvent</code> (same payload) to a message broker topic/queue (e.g., Kafka topic <code>order.confirmed</code>), which the Notification Service subscribes to. This removes the runtime coupling entirely — the async-executor dispatch reduces the coupling&#39;s practical impact today, but does not remove it (see <a href="#32-future-enhancements">Future Enhancements</a>).</p>
+<h2>30. Assumptions</h2>
+<ol>
+<li>Target engine is PostgreSQL, matching the <code>pom.xml</code> dependency. The functional brief references MySQL; schema DDL in Section 20 is written for PostgreSQL directly, and MySQL notes are kept only as migration context.</li>
+<li>Authentication is handled upstream (API Gateway or a shared auth filter); Order Service trusts the caller identity (including <code>customerId</code> and role claims) it receives, and enforces resource-level authorization against that identity (BR-10/BR-11) for all data access.</li>
+<li>Payment processing is not part of the current platform phase; orders are created and confirmed without a payment step.</li>
+<li>Product Service exposes the endpoints in Section 29.1 with those exact semantics; if the real Product Service differs, only the <code>ProductServiceClient</code> implementation needs to change, not the Order Service&#39;s domain logic.</li>
+<li>Notification Service accepts the fire-and-forget contract in Section 29.2 and is responsible for its own retry/delivery guarantees.</li>
+<li>Each order line item references exactly one product; bundles/kits are out of scope.</li>
+<li>Currency is a single implicit default (e.g., USD) — no multi-currency support in this phase.</li>
+<li><code>customerId</code> is supplied via the authenticated caller context (no dedicated Customer Service in this platform); Order Service compares it against <code>order.customerId</code> for authorization but does not validate it against an external identity store.</li>
+<li>Network calls to Product Service and Notification Service are synchronous HTTP in this phase; both services are reachable via configured base URLs (no service discovery yet).</li>
+<li>Soft-delete via <code>CANCELLED</code> status is the primary &quot;removal&quot; mechanism; hard delete (Section 22) is an optional admin-only capability, not part of the customer-facing flow.</li>
+</ol>
+<h2>31. Risks</h2>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Impact</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Product Service unavailable during order creation</td>
+<td>Orders can&#39;t be verified/confirmed</td>
+<td>Timeouts + circuit breaker + bulkhead (Section 14); return <code>503</code> with a clear error rather than hanging or starving other endpoints</td>
+</tr>
+<tr>
+<td>Stock race condition between availability check and reduce</td>
+<td>Overselling</td>
+<td>Rely on Product Service&#39;s own atomic reduce-stock endpoint returning <code>409</code> on conflict; Order Service treats that as rejection</td>
+</tr>
+<tr>
+<td>No distributed transaction across Order/Product/Notification</td>
+<td>Partial failure leaves inconsistent state (e.g., stock reduced but order not marked CONFIRMED due to a crash)</td>
+<td>Accepted risk. Near-term: a scheduled reconciliation sweep detects orders stuck in a transient state past a threshold and retries the status commit or triggers stock/restore. Longer-term: Saga pattern (orchestration)</td>
+</tr>
+<tr>
+<td>Notification Service failure after order confirmed</td>
+<td>Customer doesn&#39;t get notified, but order is valid</td>
+<td>Non-blocking/best-effort by design; failures logged; future: async event + retry via broker</td>
+</tr>
+<tr>
+<td>Duplicate order submission (client retry)</td>
+<td>Duplicate orders created</td>
+<td>Recommend client-supplied idempotency key on <code>POST /orders</code> (future enhancement)</td>
+</tr>
+<tr>
+<td>Cancellation compensation (stock restore) fails silently</td>
+<td>Product Service stock count becomes inaccurate</td>
+<td>Log and alert; also recorded by the scheduled reconciliation sweep (see row above) rather than relying solely on manual alerting</td>
+</tr>
+<tr>
+<td>Tight coupling via synchronous REST to two other services</td>
+<td>Order Service latency/availability tied to two external systems</td>
+<td>Isolated behind client interfaces; bulkhead isolation (Product Service) and async dispatch (Notification Service) limit the blast radius today — full decoupling still requires the future move to async messaging</td>
+</tr>
+<tr>
+<td>Sequential, enumerable order IDs + no ownership check</td>
+<td>Any authenticated caller could read/cancel/delete any order by guessing IDs</td>
+<td>Mitigated by resource-ownership authorization (BR-10) and admin-gating on hard-delete (BR-11)</td>
+</tr>
+</tbody></table>
+<h2>32. Future Enhancements</h2>
+<p>The following are explicitly deferred beyond the current scope:</p>
+<ul>
+<li>Replace synchronous Notification Service call with an asynchronous event (Kafka/RabbitMQ), decoupling Order Service from Notification Service availability entirely.</li>
+<li>Introduce a Saga (orchestration-based) pattern across Order → Product → Notification for proper distributed consistency and compensation, superseding the interim reconciliation sweep.</li>
+<li>Tune the retry policy (beyond the MVP circuit breaker) around <code>ProductServiceClient</code>.</li>
+<li>Add idempotency-key support on <code>POST /orders</code> to guard against duplicate submissions from client retries.</li>
+<li>Add API Gateway + service discovery (Eureka/Consul) so base URLs aren&#39;t hardcoded per environment.</li>
+<li>Add OpenAPI/Swagger documentation generation.</li>
+<li>Add distributed tracing (OpenTelemetry) to correlate a single order-placement flow across all three services.</li>
+<li>Add an order status history/audit table for full lifecycle traceability.</li>
+<li>Support partial fulfillment (confirm the items that are in stock, reject only the rest) if product requirements evolve.</li>
+<li>Containerize (Docker) and add CI/CD pipeline stages specific to this service.</li>
+</ul>
+<h2>33. Testing Strategy</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Approach</th>
+<th>Tooling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Unit — Service layer</td>
+<td>Mock <code>OrderRepository</code>, <code>ProductServiceClient</code>, <code>NotificationServiceClient</code>, <code>OrderOwnershipValidator</code>; test business rules (BR-1 to BR-12), status transitions, ownership checks, duplicate-<code>productId</code> rejection, exception paths</td>
+<td>JUnit 5, Mockito</td>
+</tr>
+<tr>
+<td>Unit — Mapper</td>
+<td>Verify entity ↔ DTO field mapping</td>
+<td>JUnit 5</td>
+</tr>
+<tr>
+<td>Repository</td>
+<td>Test JPA mappings, cascade behavior, queries/filters, sequence-based ID generation</td>
+<td><code>@DataJpaTest</code>, H2 or Testcontainers-Postgres</td>
+</tr>
+<tr>
+<td>Controller</td>
+<td>Verify request validation, status codes, error payloads, <code>403</code> on cross-customer access</td>
+<td><code>@WebMvcTest</code>, MockMvc</td>
+</tr>
+<tr>
+<td>Concurrency / async</td>
+<td>Verify the Notification Service call is dispatched off the request thread (e.g., assert the executor received a task rather than asserting on wall-clock timing) and that a slow/failing Notification Service does not delay or fail the order-creation response</td>
+<td>JUnit 5, Mockito (verify executor submission), Awaitility if needed</td>
+</tr>
+<tr>
+<td>Integration</td>
+<td>Full context with an embedded/real DB, Product/Notification services stubbed</td>
+<td><code>@SpringBootTest</code>, Testcontainers, WireMock</td>
+</tr>
+<tr>
+<td>Contract</td>
+<td>Verify Order Service&#39;s assumptions about Product/Notification Service payloads stay valid, including the recommended combined-availability shape once confirmed</td>
+<td>WireMock stubs matching Section 29; Pact (future, consumer-driven)</td>
+</tr>
+<tr>
+<td>Test data</td>
+<td>Golden-path order (single item, in stock), rejected order (out of stock), multi-item order, invalid transition, cancellation with/without prior confirmation, cross-customer access attempt, duplicate-<code>productId</code> request</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<h2>34. Development Task Breakdown</h2>
+<ol>
+<li>Project setup review — confirm DB engine (PostgreSQL, Assumption 1), add Flyway/Liquibase for schema migrations using the sequence-based DDL in Section 20.</li>
+<li>Implement <code>Order</code>, <code>OrderItem</code>, <code>OrderStatus</code> entities + repositories, with explicit <code>@Column</code> mappings per Section 21.</li>
+<li>Implement DTOs (<code>CreateOrderRequest</code>, <code>OrderItemRequest</code>, <code>UpdateOrderStatusRequest</code>, <code>OrderResponse</code>, <code>OrderItemResponse</code>, <code>ErrorResponse</code>) and <code>OrderMapper</code>.</li>
+<li>Implement <code>OrderController</code> with all endpoints from Section 22 (validation wired, no business logic yet — return stub/mock data).</li>
+<li>Implement <code>OrderServiceImpl</code> core CRUD (create without external calls yet, get all, get by id) against the repository.</li>
+<li>Implement status-transition validation (Section 11) and cancellation rule (BR-5).</li>
+<li>Implement <code>OrderOwnershipValidator</code> and wire resource-level authorization (BR-10) into GET-by-id, PATCH status, and POST cancel; gate <code>DELETE</code> behind an admin-role check (BR-11).</li>
+<li>Add duplicate-<code>productId</code> validation at the DTO layer (BR-12), before the create flow reaches persistence.</li>
+<li>Define <code>ProductServiceClient</code> interface + REST implementation against the contract in Section 29.1 (once confirmed with the Product Service owner); wire into order creation flow with parallel per-item checks, then reduce-stock.</li>
+<li>Wrap <code>ProductServiceClient</code> calls with a Resilience4j circuit breaker and a dedicated bulkhead thread pool, isolated from the pool serving read endpoints.</li>
+<li>Define <code>NotificationServiceClient</code> interface + REST implementation against Section 29.2; wire into the <code>CONFIRMED</code> transition.</li>
+<li>Configure a dedicated async executor (<code>AsyncConfig</code>, <code>notification-executor</code>) and dispatch the <code>NotificationServiceClient</code> call on it, after the local <code>CONFIRMED</code> commit and after the HTTP response is returned — not inline on the request thread.</li>
+<li>Implement <code>GlobalExceptionHandler</code> and all custom exceptions (Section 25), including <code>OrderAccessDeniedException</code> and <code>DuplicateProductInOrderException</code>.</li>
+<li>Implement the scheduled reconciliation sweep job that finds orders stuck in a transient state past a threshold and either retries the status commit or triggers stock/restore (Section 31).</li>
+<li>Write unit tests for service, mapper, and controller layers, including ownership-check and duplicate-<code>productId</code> cases.</li>
+<li>Write repository and integration tests (Testcontainers), with WireMock stubs for Product/Notification services.</li>
+<li>Add structured logging around state transitions and downstream calls, with trace ID propagation on the async notification dispatch too.</li>
+<li>Document the API (OpenAPI/Swagger) — stretch goal for this phase.</li>
+<li>Team checkpoint: confirm the Product Service availability-check contract shape (Section 29.1) with the Product Service owner before both teams build against it.</li>
+</ol>
+
+</body>
+</html>

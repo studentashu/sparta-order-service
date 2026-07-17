@@ -1,7 +1,10 @@
 package com.training.orderservice.service;
 
+import com.training.orderservice.client.NotificationServiceClient;
+import com.training.orderservice.client.ProductServiceClient;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.exception.OrderNotFoundException;
+import com.training.orderservice.mapper.OrderMapper;
 import com.training.orderservice.repository.OrderRepository;
 import com.training.orderservice.security.CallerContext;
 import com.training.orderservice.service.impl.OrderServiceImpl;
@@ -23,11 +26,20 @@ class OrderServiceImplTest {
     @Mock
     private OrderRepository orderRepository;
 
+    @Mock
+    private ProductServiceClient productServiceClient;
+
+    @Mock
+    private NotificationServiceClient notificationServiceClient;
+
+    @Mock
+    private OrderMapper orderMapper;
+
     private OrderServiceImpl orderService;
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderServiceImpl(orderRepository);
+        orderService = new OrderServiceImpl(orderRepository, productServiceClient, notificationServiceClient, orderMapper);
     }
 
     @Test
