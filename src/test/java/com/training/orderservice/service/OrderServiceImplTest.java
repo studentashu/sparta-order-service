@@ -32,6 +32,7 @@ import org.springframework.data.domain.Pageable;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +45,8 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceImplTest {
+
+    private static final UUID PRODUCT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
 
     @Mock
     private OrderRepository orderRepository;
@@ -106,10 +109,10 @@ class OrderServiceImplTest {
     @Test
     void createOrder_confirmsAndReturnsResponseWhenStockAvailable() {
         CreateOrderRequest request = new CreateOrderRequest(101L, "Jane Doe", "jane@example.com",
-                "221B Baker Street", List.of(new OrderItemRequest(55L, 2)));
+                "221B Baker Street", List.of(new OrderItemRequest(PRODUCT_ID, 2)));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
-        when(productServiceClient.getProduct(55L))
-                .thenReturn(new ProductSnapshot(55L, "Wireless Mouse", new BigDecimal("25.00"), 10));
+        when(productServiceClient.getProduct(PRODUCT_ID))
+                .thenReturn(new ProductSnapshot(PRODUCT_ID, "Wireless Mouse", new BigDecimal("25.00"), 10));
         OrderResponse mapped = new OrderResponse(1001L, 101L, "Jane Doe", "jane@example.com",
                 "221B Baker Street", OrderStatus.CONFIRMED, new BigDecimal("50.00"), List.of(), null, null);
         when(orderMapper.toResponse(any(Order.class))).thenReturn(mapped);
@@ -117,17 +120,17 @@ class OrderServiceImplTest {
         OrderResponse result = orderService.createOrder(request);
 
         assertThat(result).isSameAs(mapped);
-        verify(productServiceClient).reduceStock(eq(55L), eq(2), any());
+        verify(productServiceClient).reduceStock(eq(PRODUCT_ID), eq(2), any());
         verify(notificationServiceClient).sendOrderConfirmation(any());
     }
 
     @Test
     void createOrder_throwsInsufficientStockWhenNotEnoughStock() {
         CreateOrderRequest request = new CreateOrderRequest(101L, "Jane Doe", "jane@example.com",
-                "221B Baker Street", List.of(new OrderItemRequest(55L, 5)));
+                "221B Baker Street", List.of(new OrderItemRequest(PRODUCT_ID, 5)));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
-        when(productServiceClient.getProduct(55L))
-                .thenReturn(new ProductSnapshot(55L, "Wireless Mouse", new BigDecimal("25.00"), 2));
+        when(productServiceClient.getProduct(PRODUCT_ID))
+                .thenReturn(new ProductSnapshot(PRODUCT_ID, "Wireless Mouse", new BigDecimal("25.00"), 2));
 
         assertThatThrownBy(() -> orderService.createOrder(request))
                 .isInstanceOf(InsufficientStockException.class);
@@ -138,7 +141,7 @@ class OrderServiceImplTest {
     void createOrder_throwsOnDuplicateProduct() {
         CreateOrderRequest request = new CreateOrderRequest(101L, "Jane Doe", "jane@example.com",
                 "221B Baker Street",
-                List.of(new OrderItemRequest(55L, 1), new OrderItemRequest(55L, 2)));
+                List.of(new OrderItemRequest(PRODUCT_ID, 1), new OrderItemRequest(PRODUCT_ID, 2)));
 
         assertThatThrownBy(() -> orderService.createOrder(request))
                 .isInstanceOf(DuplicateProductInOrderException.class);
@@ -219,7 +222,7 @@ class OrderServiceImplTest {
     void cancelOrder_cancelsConfirmedAndRestoresStock() {
         Order order = new Order(101L, "Jane Doe", "jane@example.com", "221B Baker Street");
         order.setStatus(OrderStatus.CONFIRMED);
-        order.addItem(new OrderItem(order, 55L, "Wireless Mouse", new BigDecimal("25.00"), 2));
+        order.addItem(new OrderItem(order, PRODUCT_ID, "Wireless Mouse", new BigDecimal("25.00"), 2));
         when(orderRepository.findByIdWithItems(1001L)).thenReturn(Optional.of(order));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
         OrderResponse mapped = new OrderResponse(1001L, 101L, "Jane Doe", "jane@example.com",
@@ -230,7 +233,7 @@ class OrderServiceImplTest {
 
         assertThat(result).isSameAs(mapped);
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
-        verify(productServiceClient).restoreStock(eq(55L), eq(2), any());
+        verify(productServiceClient).restoreStock(eq(PRODUCT_ID), eq(2), any());
     }
 
     @Test

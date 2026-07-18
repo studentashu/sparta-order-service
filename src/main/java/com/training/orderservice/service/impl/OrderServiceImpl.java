@@ -31,6 +31,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class OrderServiceImpl implements OrderService {
@@ -192,7 +193,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     private void validateNoDuplicateProducts(CreateOrderRequest request) {
-        Set<Long> seen = new HashSet<>();
+        Set<UUID> seen = new HashSet<>();
         for (OrderItemRequest item : request.getItems()) {
             if (!seen.add(item.getProductId())) {
                 throw new DuplicateProductInOrderException(

@@ -80,7 +80,7 @@ class OrderControllerTest {
         when(orderService.createOrder(any())).thenReturn(response);
 
         String body = "{\"customerId\":101,\"customerName\":\"Jane Doe\",\"customerEmail\":\"jane@example.com\","
-                + "\"shippingAddress\":\"221B Baker Street\",\"items\":[{\"productId\":55,\"quantity\":2}]}";
+                + "\"shippingAddress\":\"221B Baker Street\",\"items\":[{\"productId\":\"11111111-1111-1111-1111-111111111111\",\"quantity\":2}]}";
 
         mockMvc.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isCreated())
