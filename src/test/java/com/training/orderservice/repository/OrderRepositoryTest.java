@@ -10,6 +10,7 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.data.domain.PageRequest;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -81,6 +82,33 @@ class OrderRepositoryTest {
         assertThat(orderRepository.findByOptionalFilters(null, 101L, page).getTotalElements()).isEqualTo(2);
         // both -> the single CONFIRMED order for customer 202
         assertThat(orderRepository.findByOptionalFilters(OrderStatus.CONFIRMED, 202L, page).getTotalElements()).isEqualTo(1);
+    }
+
+    @Test
+    void findByStatusAndUpdatedAtBefore_returnsOnlyOrdersOlderThanThreshold() {
+        orderRepository.save(newOrder(101L, OrderStatus.PENDING));
+        entityManager.flush();
+        entityManager.clear();
+
+        LocalDateTime future = LocalDateTime.now().plusMinutes(1);
+        LocalDateTime past = LocalDateTime.now().minusMinutes(1);
+
+        assertThat(orderRepository.findByStatusAndUpdatedAtBefore(OrderStatus.PENDING, future, PageRequest.of(0, 10))
+                .getTotalElements()).isEqualTo(1);
+        assertThat(orderRepository.findByStatusAndUpdatedAtBefore(OrderStatus.PENDING, past, PageRequest.of(0, 10))
+                .getTotalElements()).isEqualTo(0);
+    }
+
+    @Test
+    void findByStatusAndUpdatedAtBefore_excludesOtherStatuses() {
+        orderRepository.save(newOrder(101L, OrderStatus.CONFIRMED));
+        entityManager.flush();
+        entityManager.clear();
+
+        LocalDateTime future = LocalDateTime.now().plusMinutes(1);
+
+        assertThat(orderRepository.findByStatusAndUpdatedAtBefore(OrderStatus.PENDING, future, PageRequest.of(0, 10))
+                .getTotalElements()).isEqualTo(0);
     }
 
     @Test

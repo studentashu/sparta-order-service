@@ -10,6 +10,7 @@ import com.training.orderservice.dto.request.UpdateOrderStatusRequest;
 import com.training.orderservice.dto.response.OrderResponse;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
+import com.training.orderservice.entity.OrderReconciliationLog;
 import com.training.orderservice.entity.OrderStatus;
 import com.training.orderservice.exception.DuplicateProductInOrderException;
 import com.training.orderservice.exception.InsufficientStockException;
@@ -18,6 +19,7 @@ import com.training.orderservice.exception.OrderAccessDeniedException;
 import com.training.orderservice.exception.OrderNotFoundException;
 import com.training.orderservice.mapper.OrderMapper;
 import com.training.orderservice.repository.OrderRepository;
+import com.training.orderservice.repository.OrderReconciliationLogRepository;
 import com.training.orderservice.security.CallerContext;
 import com.training.orderservice.service.OrderService;
 import org.slf4j.Logger;
@@ -38,15 +40,18 @@ public class OrderServiceImpl implements OrderService {
     private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
 
     private final OrderRepository orderRepository;
+    private final OrderReconciliationLogRepository reconciliationLogRepository;
     private final ProductServiceClient productServiceClient;
     private final NotificationServiceClient notificationServiceClient;
     private final OrderMapper orderMapper;
 
     public OrderServiceImpl(OrderRepository orderRepository,
+                             OrderReconciliationLogRepository reconciliationLogRepository,
                              ProductServiceClient productServiceClient,
                              NotificationServiceClient notificationServiceClient,
                              OrderMapper orderMapper) {
         this.orderRepository = orderRepository;
+        this.reconciliationLogRepository = reconciliationLogRepository;
         this.productServiceClient = productServiceClient;
         this.notificationServiceClient = notificationServiceClient;
         this.orderMapper = orderMapper;
@@ -161,9 +166,19 @@ public class OrderServiceImpl implements OrderService {
         }
 
         // BR-6: a CONFIRMED order already had its stock reduced, so restore it (best-effort).
+        // A failure here must not abort the cancellation itself (that would leave the customer's
+        // cancel request lost as well as the stock inconsistent) — it's recorded instead so the
+        // reconciliation sweep (Section 31) can retry the restore later.
         if (from == OrderStatus.CONFIRMED) {
             for (OrderItem item : order.getItems()) {
-                productServiceClient.restoreStock(item.getProductId(), item.getQuantity(), order.getId());
+                try {
+                    productServiceClient.restoreStock(item.getProductId(), item.getQuantity(), order.getId());
+                } catch (Exception ex) {
+                    log.warn("Stock restore failed for order {} product {} (will be retried by the reconciliation sweep): {}",
+                            orderId, item.getProductId(), ex.getMessage());
+                    reconciliationLogRepository.save(OrderReconciliationLog.forRestoreFailure(
+                            order.getId(), item.getProductId(), item.getQuantity()));
+                }
             }
         }
 

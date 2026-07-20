@@ -9,14 +9,17 @@ import com.training.orderservice.dto.request.UpdateOrderStatusRequest;
 import com.training.orderservice.dto.response.OrderResponse;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
+import com.training.orderservice.entity.OrderReconciliationLog;
 import com.training.orderservice.entity.OrderStatus;
 import com.training.orderservice.exception.DuplicateProductInOrderException;
 import com.training.orderservice.exception.InsufficientStockException;
 import com.training.orderservice.exception.InvalidOrderStatusTransitionException;
 import com.training.orderservice.exception.OrderAccessDeniedException;
 import com.training.orderservice.exception.OrderNotFoundException;
+import com.training.orderservice.exception.ProductServiceUnavailableException;
 import com.training.orderservice.mapper.OrderMapper;
 import com.training.orderservice.repository.OrderRepository;
+import com.training.orderservice.repository.OrderReconciliationLogRepository;
 import com.training.orderservice.security.CallerContext;
 import com.training.orderservice.service.impl.OrderServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -47,6 +51,9 @@ class OrderServiceImplTest {
 
     @Mock
     private OrderRepository orderRepository;
+
+    @Mock
+    private OrderReconciliationLogRepository reconciliationLogRepository;
 
     @Mock
     private ProductServiceClient productServiceClient;
@@ -61,7 +68,8 @@ class OrderServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderServiceImpl(orderRepository, productServiceClient, notificationServiceClient, orderMapper);
+        orderService = new OrderServiceImpl(orderRepository, reconciliationLogRepository, productServiceClient,
+                notificationServiceClient, orderMapper);
     }
 
     @Test
@@ -231,6 +239,27 @@ class OrderServiceImplTest {
         assertThat(result).isSameAs(mapped);
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         verify(productServiceClient).restoreStock(eq(55L), eq(2), any());
+    }
+
+    @Test
+    void cancelOrder_recordsReconciliationLogAndStillCancelsWhenRestoreFails() {
+        Order order = new Order(101L, "Jane Doe", "jane@example.com", "221B Baker Street");
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.addItem(new OrderItem(order, 55L, "Wireless Mouse", new BigDecimal("25.00"), 2));
+        when(orderRepository.findByIdWithItems(1001L)).thenReturn(Optional.of(order));
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+        doThrow(new ProductServiceUnavailableException("Product Service down"))
+                .when(productServiceClient).restoreStock(eq(55L), eq(2), any());
+        OrderResponse mapped = new OrderResponse(1001L, 101L, "Jane Doe", "jane@example.com",
+                "221B Baker Street", OrderStatus.CANCELLED, new BigDecimal("50.00"), List.of(), null, null);
+        when(orderMapper.toResponse(any(Order.class))).thenReturn(mapped);
+
+        OrderResponse result = orderService.cancelOrder(1001L, new CallerContext(101L, "CUSTOMER"));
+
+        // Best-effort (BR-6): a failed restore must not block the cancellation itself.
+        assertThat(result).isSameAs(mapped);
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        verify(reconciliationLogRepository).save(any(OrderReconciliationLog.class));
     }
 
     @Test

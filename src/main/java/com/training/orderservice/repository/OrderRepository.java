@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.Optional;
 
 public interface OrderRepository extends JpaRepository<Order, Long> {
@@ -20,4 +21,6 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     Page<Order> findByOptionalFilters(@Param("status") OrderStatus status,
                                        @Param("customerId") Long customerId,
                                        Pageable pageable);
+
+    Page<Order> findByStatusAndUpdatedAtBefore(OrderStatus status, LocalDateTime threshold, Pageable pageable);
 }
